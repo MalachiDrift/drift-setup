@@ -1,6 +1,6 @@
 # drift-setup
 
-Public Discord bot that scaffolds a server after you invite it.
+**Malachi's Discord Architect** — public Discord bot that scaffolds a server after you invite it.
 
 ## Streamer flow
 
