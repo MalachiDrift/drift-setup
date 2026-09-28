@@ -34,7 +34,7 @@ Only server admins (or user IDs in `OWNER_IDS`) can run `/setup` and `/build`.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # or .venv\\Scripts\\activate on Windows
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 export DISCORD_BOT_TOKEN=...
 export OWNER_IDS=your_discord_user_id
