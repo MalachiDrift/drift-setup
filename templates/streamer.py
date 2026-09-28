@@ -1,11 +1,18 @@
 import discord
 
+# INFO stays visible to @everyone (welcome/rules gate). Other cats locked until Viewer.
 STREAMER_STRUCTURE = {
     "INFO": [
         "👋-welcome",
         "📜-rules",
         "📢-announcements",
         "📅-stream-schedule",
+    ],
+    "SOCIALS": [
+        "🟣-twitch",
+        "📺-youtube",
+        "🎵-tiktok",
+        "📸-instagram",
     ],
     "LIVE": [
         "🔴-now-live",
@@ -35,3 +42,5 @@ STREAMER_ROLES = [
     ("VIP", discord.Color.gold()),
     ("Viewer", discord.Color.light_grey()),
 ]
+STREAMER_MEMBER_ROLE = "Viewer"
+STREAMER_PUBLIC_CATEGORIES = ("INFO",)

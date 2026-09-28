@@ -7,15 +7,18 @@ Public Discord bot that scaffolds a server after you invite it.
 1. Streamer creates a Discord (or empties one).
 2. They make **you** an admin.
 3. You invite this bot with **Administrator** (or Manage Channels + Manage Roles).
-4. Run `/setup` → **Streamer**.
+4. Run `/setup` → **Streamer** and enter the game.
 5. Optional: `/build cozy horror streamer community` if `GROQ_API_KEY` is set.
+
+`/setup` asks for the game, creates emoji-named channels (including socials), and gates the server behind a rules **I agree** button (Member/Viewer role). Keep the bot role **above** Member/Viewer.
 
 ## Commands
 
 | Command | What it does |
-|---------|--------------|
-| `/setup` | Apply `streamer` or `basic` template |
+|---------|----------------|
+| `/setup` | Apply `streamer` or `basic` template (asks for **game**; emoji channels + rules gate) |
 | `/build <description>` | Invent + create a custom layout (needs Groq) |
+| `/delete` | Delete a specific channel or category (admins only) |
 | `/invite` | Shows the OAuth invite link + flow |
 
 Only server admins (or user IDs in `OWNER_IDS`) can run `/setup` and `/build`.
