@@ -5,7 +5,7 @@ drift-setup — invite the bot, then scaffold a Discord from templates.
 Flow:
   1) Streamer makes you (or their mods) admin
   2) Invite this bot with Manage Channels + Manage Roles (Administrator is easiest)
-  3) Run /setup template:streamer  (or /setup template:basic, /build <description>)
+  3) Run /setup template:streamer game:Valorant  (or /setup template:basic, /build <description>)
 
 Env:
   DISCORD_BOT_TOKEN   required
@@ -16,22 +16,29 @@ Env:
 from __future__ import annotations
 
 import json
-import os
 import re
-import urllib.error
 import urllib.request
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from templates.streamer import STREAMER_ROLES, STREAMER_STRUCTURE, STREAMER_VOICE
-from templates.basic import BASIC_ROLES, BASIC_STRUCTURE, BASIC_VOICE
-
-
-def env(name: str) -> str:
-    return (os.environ.get(name, "") or "").strip().strip('"').strip("'")
-
+from templates.streamer import (
+    STREAMER_MEMBER_ROLE,
+    STREAMER_PUBLIC_CATEGORIES,
+    STREAMER_ROLES,
+    STREAMER_STRUCTURE,
+    STREAMER_VOICE,
+)
+from templates.basic import (
+    BASIC_MEMBER_ROLE,
+    BASIC_PUBLIC_CATEGORIES,
+    BASIC_ROLES,
+    BASIC_STRUCTURE,
+    BASIC_VOICE,
+)
+from helpers import can_setup, channel_base, env, find_text_by_base, slug
+from gate import RulesAgreeView, lock_gated_categories, post_onboarding
 
 TOKEN = env("DISCORD_BOT_TOKEN")
 GROQ_API_KEY = env("GROQ_API_KEY")
@@ -53,30 +60,83 @@ PRESETS = {
         "structure": STREAMER_STRUCTURE,
         "voice": STREAMER_VOICE,
         "roles": STREAMER_ROLES,
+        "member_role": STREAMER_MEMBER_ROLE,
+        "public_categories": STREAMER_PUBLIC_CATEGORIES,
     },
     "basic": {
         "label": "Basic community",
         "structure": BASIC_STRUCTURE,
         "voice": BASIC_VOICE,
         "roles": BASIC_ROLES,
+        "member_role": BASIC_MEMBER_ROLE,
+        "public_categories": BASIC_PUBLIC_CATEGORIES,
     },
 }
 
 
-def slug(name: str) -> str:
-    name = name.strip().lower().replace(" ", "-")
-    name = re.sub(r"[^a-z0-9\-_]+", "", name)
-    return name[:90] or "channel"
+async def apply_game(guild: discord.Guild, game: str, reason: str, created: list[str]) -> None:
+    game = game.strip()[:80]
+    if not game:
+        return
+    game_slug = slug(game)
+    game_ch_name = f"🎮-{game_slug}"
+    topic = f"Main game: {game}"
+
+    gaming = discord.utils.get(guild.categories, name="Gaming") or discord.utils.get(
+        guild.categories, name="GAMING"
+    )
+    if not gaming:
+        gaming = await guild.create_category("Gaming", reason=reason)
+        created.append("cat:Gaming")
+
+    existing = discord.utils.get(guild.text_channels, name=game_ch_name)
+    if not existing:
+        for ch in guild.text_channels:
+            if ch.category_id == gaming.id and channel_base(ch.name) == game_slug:
+                existing = ch
+                break
+
+    rename_target = find_text_by_base(guild, "now-playing", "current-game")
+    if not existing and rename_target and rename_target.name != game_ch_name:
+        await rename_target.edit(name=game_ch_name, topic=topic, reason=reason)
+        created.append(f"rename:#{game_ch_name}")
+        existing = rename_target
+    elif rename_target and existing and rename_target.id != existing.id:
+        try:
+            await rename_target.edit(topic=topic, reason=reason)
+        except discord.HTTPException:
+            pass
+
+    if not existing:
+        existing = await guild.create_text_channel(
+            game_ch_name, category=gaming, topic=topic, reason=reason
+        )
+        created.append(f"#{game_ch_name}")
+    else:
+        try:
+            await existing.edit(topic=topic, reason=reason)
+        except discord.HTTPException:
+            pass
+
+    general = find_text_by_base(guild, "general")
+    if general:
+        try:
+            await general.edit(topic=topic, reason=reason)
+        except discord.HTTPException:
+            pass
+
+    announcements = find_text_by_base(guild, "announcements")
+    if announcements:
+        try:
+            await announcements.send(f"Main game: **{game}**")
+            created.append(f"msg:#{announcements.name}")
+        except discord.HTTPException:
+            pass
 
 
-def can_setup(member: discord.Member) -> bool:
-    if member.id in OWNER_IDS:
-        return True
-    perms = member.guild_permissions
-    return perms.administrator or (perms.manage_guild and perms.manage_channels and perms.manage_roles)
-
-
-async def apply_preset(guild: discord.Guild, key: str, reason: str) -> str:
+async def apply_preset(
+    guild: discord.Guild, key: str, reason: str, game: str | None = None
+) -> str:
     preset = PRESETS[key]
     created: list[str] = []
 
@@ -85,6 +145,16 @@ async def apply_preset(guild: discord.Guild, key: str, reason: str) -> str:
             continue
         await guild.create_role(name=name, colour=color, reason=reason)
         created.append(f"role:{name}")
+
+    member_role_name = preset["member_role"]
+    member_role = discord.utils.get(guild.roles, name=member_role_name)
+    if not member_role:
+        member_role = await guild.create_role(
+            name=member_role_name, colour=discord.Color.light_grey(), reason=reason
+        )
+        created.append(f"role:{member_role_name}")
+
+    public_cats = tuple(preset.get("public_categories") or ("INFO",))
 
     for cat_name, channels in preset["structure"].items():
         cat = discord.utils.get(guild.categories, name=cat_name)
@@ -103,9 +173,28 @@ async def apply_preset(guild: discord.Guild, key: str, reason: str) -> str:
                 await guild.create_voice_channel(vn, category=cat, reason=reason)
                 created.append(f"voice:{vn}")
 
+    if game and game.strip():
+        await apply_game(guild, game, reason, created)
+
+    await lock_gated_categories(guild, public_cats, member_role, reason, created)
+    await post_onboarding(guild, member_role_name, reason, created)
+
+    game_note = f"\nMain game: **{game.strip()}**" if game and game.strip() else ""
+    gate_note = (
+        f"\nRules gate: tap **I agree** in rules for **{member_role_name}**. "
+        "Keep my role above that role."
+    )
     if not created:
-        return f"**{preset['label']}** already looks set up — nothing new created."
-    return f"**{preset['label']}** applied. Created: " + ", ".join(created[:50])
+        return (
+            f"**{preset['label']}** already looks set up — nothing new created."
+            f"{game_note}{gate_note}"
+        )
+    return (
+        f"**{preset['label']}** applied. Created: "
+        + ", ".join(created[:50])
+        + game_note
+        + gate_note
+    )
 
 
 async def apply_plan(guild: discord.Guild, plan: dict, reason: str) -> str:
@@ -200,6 +289,7 @@ class DriftSetup(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self) -> None:
+        self.add_view(RulesAgreeView())
         await self.tree.sync()
 
 
@@ -215,18 +305,25 @@ async def on_ready():
 
 
 @bot.tree.command(name="setup", description="Scaffold this server from a template")
-@app_commands.describe(template="Which layout to apply")
+@app_commands.describe(
+    template="Which layout to apply",
+    game="What game is this server for?",
+)
 @app_commands.choices(
     template=[
         app_commands.Choice(name="Streamer (Twitch/community ready)", value="streamer"),
         app_commands.Choice(name="Basic community", value="basic"),
     ]
 )
-async def setup_cmd(interaction: discord.Interaction, template: app_commands.Choice[str]):
+async def setup_cmd(
+    interaction: discord.Interaction,
+    template: app_commands.Choice[str],
+    game: str,
+):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("Use this in a server.", ephemeral=True)
         return
-    if not can_setup(interaction.user):
+    if not can_setup(interaction.user, OWNER_IDS):
         await interaction.response.send_message(
             "Need Administrator (or Manage Server + Channels + Roles), or be in OWNER_IDS.",
             ephemeral=True,
@@ -242,9 +339,51 @@ async def setup_cmd(interaction: discord.Interaction, template: app_commands.Cho
 
     await interaction.response.defer(thinking=True)
     result = await apply_preset(
-        interaction.guild, template.value, f"drift-setup /setup by {interaction.user}"
+        interaction.guild,
+        template.value,
+        f"drift-setup /setup by {interaction.user}",
+        game=game,
     )
     await interaction.followup.send(result)
+
+
+@bot.tree.command(name="delete", description="Delete a channel or category")
+@app_commands.describe(channel="Channel or category to delete")
+async def delete_cmd(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+    | discord.VoiceChannel
+    | discord.CategoryChannel
+    | discord.StageChannel
+    | discord.ForumChannel,
+):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Use this in a server.", ephemeral=True)
+        return
+    if not can_setup(interaction.user, OWNER_IDS):
+        await interaction.response.send_message("Not allowed to delete channels here.", ephemeral=True)
+        return
+    me = interaction.guild.me
+    if not me or not me.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "I need **Manage Channels** to delete.",
+            ephemeral=True,
+        )
+        return
+    name = channel.name
+    kind = "category" if isinstance(channel, discord.CategoryChannel) else "channel"
+    try:
+        await channel.delete(reason=f"drift-setup /delete by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"Can't delete **{name}** — check my role is above it / I have Manage Channels.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Delete failed: {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(f"Deleted {kind} **{name}**.", ephemeral=True)
 
 
 @bot.tree.command(name="build", description="Invent + create a layout from a short description")
@@ -253,7 +392,7 @@ async def build_cmd(interaction: discord.Interaction, description: str):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message("Use this in a server.", ephemeral=True)
         return
-    if not can_setup(interaction.user):
+    if not can_setup(interaction.user, OWNER_IDS):
         await interaction.response.send_message("Not allowed to build here.", ephemeral=True)
         return
     if not GROQ_API_KEY:
@@ -280,7 +419,6 @@ async def build_cmd(interaction: discord.Interaction, description: str):
 @bot.tree.command(name="invite", description="How to invite this bot to a streamer's server")
 async def invite_cmd(interaction: discord.Interaction):
     client_id = bot.user.id if bot.user else "YOUR_CLIENT_ID"
-    # Administrator bit 8 = 0x8; Manage Channels 16; Manage Roles 268435456
     perms = 8  # Administrator
     url = (
         f"https://discord.com/api/oauth2/authorize?client_id={client_id}"
@@ -291,8 +429,9 @@ async def invite_cmd(interaction: discord.Interaction):
         "1. They create the server (or use an empty one)\n"
         "2. They make you an admin\n"
         "3. You invite the bot (link below) with Administrator\n"
-        "4. Run `/setup` → **Streamer**\n"
-        "5. Optional: `/build cozy FPS streamer hub` for a custom layout\n\n"
+        "4. Run `/setup` → **Streamer** and enter the **game**\n"
+        "5. New members read rules and tap **I agree** for Viewer access\n"
+        "6. Optional: `/build cozy FPS streamer hub` for a custom layout\n\n"
         f"Invite: {url}",
         ephemeral=True,
     )
